@@ -11,480 +11,350 @@ from datetime import datetime
 from pathlib import Path
 import requests
 
-# Константы
-SETTINGS_FILE = "settings.json"
-USERS_FILE = "users.json"
-LOGS_DIR = Path("logs")
-API_BASE_URL = "https://api.mexc.com/api/v3"
-
-# Глобальные переменные
-active_user = None
-bot_running = False
-bot_paused = False
-trading_thread = None
-pnl_data = {"realized": 0.0, "unrealized": 0.0, "trades": []}
-
-# Утилиты
-
-def log(message):
-    """Логирование сообщений в файл и консоль"""
-    LOGS_DIR.mkdir(exist_ok=True)
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    log_message = f"[{timestamp}] {message}"
-    
-    if active_user:
-        log_file = LOGS_DIR / f"{active_user}_log.txt"
-        with open(log_file, "a") as f:
-            f.write(log_message + "\n")
-    print(log_message)
-
-def save_json(path, data):
-    """Сохранение данных в JSON файл"""
-    with open(path, 'w') as f:
-        json.dump(data, f, indent=2)
-
-def load_json(path):
-    """Загрузка данных из JSON файла"""
-    if os.path.exists(path):
-        with open(path, 'r') as f:
-            return json.load(f)
-    return {}
-
-def sign_request(api_secret, params):
-    """Подпись запроса к API MEXC"""
-    query_string = urllib.parse.urlencode(params)
-    signature = hmac.new(
-        api_secret.encode('utf-8'),
-        query_string.encode('utf-8'),
-        hashlib.sha256
-    ).hexdigest()
-    return signature
-
-# Работа с пользователями
-
-def load_users():
-    """Загрузка данных пользователей"""
-    return load_json(USERS_FILE)
-
-def save_users(users):
-    """Сохранение данных пользователей"""
-    save_json(USERS_FILE, users)
-
-def create_user():
-    """Создание нового пользователя"""
-    users = load_users()
-    username = input("Введите имя пользователя: ")
-    
-    if username in users:
-        log("Пользователь уже существует!")
-        return None
-        
-    password = getpass("Введите пароль: ")
-    api_key = input("Введите API ключ от MEXC: ")
-    api_secret = getpass("Введите API секрет от MEXC: ")
-    pair = input("Введите торговую пару (например, BTCUSDT): ").upper()
-    
-    users[username] = {
-        "password": password,
-        "api_key": api_key,
-        "api_secret": api_secret,
-        "pair": pair
-    }
-    save_users(users)
-    save_settings(username, default_settings())
-    log(f"Пользователь {username} создан.")
-    return username
-
-def select_user():
-    """Выбор пользователя"""
-    users = load_users()
-    if not users:
-        log("Нет зарегистрированных пользователей. Создание нового:")
-        return create_user()
-        
-    print("Доступные пользователи:")
-    for name in users:
-        print(f"- {name}")
-        
-    username = input("Выберите имя пользователя: ")
-    if username not in users:
-        log("Пользователь не найден.")
-        return select_user()
-        
-    password = getpass("Введите пароль: ")
-    if password != users[username]["password"]:
-        log("Неверный пароль.")
-        return select_user()
-        
-    return username
-
-# Настройки
-
-def default_settings():
-    """Настройки по умолчанию"""
-    return {
-        "profit_percentage": 0.5,
-        "stop_loss_percentage": 1.0,
+# Конфигурация
+CONFIG = {
+    "SETTINGS_FILE": "settings.json",
+    "USERS_FILE": "users.json",
+    "LOGS_DIR": "logs",
+    "API_URL": "https://api.mexc.com/api/v3",
+    "DEFAULT_SETTINGS": {
+        "profit_percent": 0.3,
+        "drop_percent": 1.0,
         "delay": 30,
-        "order_size": 0.001,
+        "order_size": 5.0,
         "trading_pair": "BTCUSDT",
         "test_mode": True
     }
+}
 
-def load_settings(user):
-    """Загрузка настроек пользователя"""
-    settings = load_json(SETTINGS_FILE)
-    return settings.get(user, default_settings())
-
-def save_settings(user, user_settings):
-    """Сохранение настроек пользователя"""
-    settings = load_json(SETTINGS_FILE)
-    settings[user] = user_settings
-    save_json(SETTINGS_FILE, settings)
-
-def update_setting(key, value):
-    """Обновление настройки"""
-    user_settings = load_settings(active_user)
-    
-    # Проверка типов значений
-    if key in ["profit_percentage", "stop_loss_percentage", "delay"]:
-        value = float(value)
-    elif key == "order_size":
-        value = float(value)
-    elif key == "trading_pair":
-        value = value.upper()
-    elif key == "test_mode":
-        value = value.lower() == "true"
-    
-    user_settings[key] = value
-    save_settings(active_user, user_settings)
-    log(f"Настройка {key} обновлена на {value}")
-
-# API MEXC
-
-def get_price(pair):
-    """Получение текущей цены"""
-    url = f"{API_BASE_URL}/ticker/price"
-    params = {"symbol": pair}
-    
-    try:
-        response = requests.get(url, params=params)
-        if response.status_code == 200:
-            return float(response.json()["price"])
-        else:
-            log(f"Ошибка получения цены: {response.text}")
-            return None
-    except Exception as e:
-        log(f"Ошибка запроса цены: {e}")
-        return None
-
-def get_balance(api_key, api_secret, coin="USDT"):
-    """Получение баланса"""
-    url = f"{API_BASE_URL}/account"
-    timestamp = int(time.time() * 1000)
-    params = {"timestamp": timestamp}
-    signature = sign_request(api_secret, params)
-    
-    headers = {"X-MEXC-APIKEY": api_key}
-    params["signature"] = signature
-    
-    try:
-        response = requests.get(url, headers=headers, params=params)
-        if response.status_code == 200:
-            balances = response.json().get("balances", [])
-            for asset in balances:
-                if asset["asset"] == coin:
-                    return float(asset["free"])
-            return 0.0
-        else:
-            log(f"Ошибка получения баланса: {response.text}")
-            return None
-    except Exception as e:
-        log(f"Ошибка запроса баланса: {e}")
-        return None
-
-def create_order(api_key, api_secret, symbol, side, quantity, price=None, order_type="LIMIT"):
-    """Создание ордера"""
-    url = f"{API_BASE_URL}/order"
-    timestamp = int(time.time() * 1000)
-    params = {
-        "symbol": symbol,
-        "side": side,
-        "type": order_type,
-        "quantity": quantity,
-        "timestamp": timestamp
-    }
-    
-    if order_type == "LIMIT":
-        params["price"] = price
-        params["timeInForce"] = "GTC"
-    
-    signature = sign_request(api_secret, params)
-    headers = {"X-MEXC-APIKEY": api_key}
-    params["signature"] = signature
-    
-    try:
-        response = requests.post(url, headers=headers, params=params)
-        if response.status_code == 200:
-            return response.json()
-        else:
-            log(f"Ошибка создания ордера: {response.text}")
-            return None
-    except Exception as e:
-        log(f"Ошибка запроса ордера: {e}")
-        return None
-
-def cancel_order(api_key, api_secret, symbol, order_id):
-    """Отмена ордера"""
-    url = f"{API_BASE_URL}/order"
-    timestamp = int(time.time() * 1000)
-    params = {
-        "symbol": symbol,
-        "orderId": order_id,
-        "timestamp": timestamp
-    }
-    
-    signature = sign_request(api_secret, params)
-    headers = {"X-MEXC-APIKEY": api_key}
-    params["signature"] = signature
-    
-    try:
-        response = requests.delete(url, headers=headers, params=params)
-        if response.status_code == 200:
-            return response.json()
-        else:
-            log(f"Ошибка отмены ордера: {response.text}")
-            return None
-    except Exception as e:
-        log(f"Ошибка запроса отмены: {e}")
-        return None
-
-# Торговля
-
-def autobuy_loop():
-    """Основной торговый цикл"""
-    global bot_running, bot_paused, pnl_data
-    
-    users = load_users()
-    user_data = users[active_user]
-    settings = load_settings(active_user)
-    
-    api_key = user_data["api_key"]
-    api_secret = user_data["api_secret"]
-    pair = settings["trading_pair"]
-    order_size = settings["order_size"]
-    profit_percent = settings["profit_percentage"] / 100
-    stop_loss_percent = settings["stop_loss_percentage"] / 100
-    delay = settings["delay"]
-    test_mode = settings["test_mode"]
-    
-    log(f"Запуск торгового цикла для пары {pair}")
-    log(f"Режим: {'ТЕСТОВЫЙ' if test_mode else 'РЕАЛЬНЫЙ'}")
-    
-    active_orders = []
-    
-    while bot_running:
-        if bot_paused:
-            time.sleep(1)
-            continue
+class MexcTrader:
+    def __init__(self):
+        self.running = False
+        self.paused = False
+        self.thread = None
+        self.orders = []
+        self.pnl = {
+            "total_profit": 0.0,
+            "total_trades": 0,
+            "active_orders": 0,
+            "history": []
+        }
         
-        # Получаем текущую цену
-        current_price = get_price(pair)
-        if current_price is None:
-            time.sleep(5)
-            continue
+        self.setup_files()
         
-        # Проверяем баланс
-        if not test_mode:
-            balance = get_balance(api_key, api_secret)
-            if balance is None or balance < order_size * current_price:
-                log("Недостаточно средств для торговли!")
-                time.sleep(10)
-                continue
+    def setup_files(self):
+        """Инициализация необходимых файлов"""
+        Path(CONFIG['LOGS_DIR']).mkdir(exist_ok=True)
+        for file in [CONFIG['SETTINGS_FILE'], CONFIG['USERS_FILE']]:
+            if not os.path.exists(file):
+                with open(file, 'w') as f:
+                    json.dump({}, f)
+    
+    # API методы
+    def sign_request(self, secret, params):
+        query = urllib.parse.urlencode(params)
+        return hmac.new(
+            secret.encode('utf-8'),
+            query.encode('utf-8'),
+            hashlib.sha256
+        ).hexdigest()
+    
+    def api_request(self, endpoint, params=None, method='GET'):
+        url = f"{CONFIG['API_URL']}/{endpoint}"
+        headers = {"X-MEXC-APIKEY": self.user['api_key']}
         
-        # Создаем ордер на покупку
-        buy_price = round(current_price * 0.999, 2)  # Немного ниже рынка
-        log(f"Попытка покупки {order_size} {pair} по цене {buy_price}")
+        if params is None:
+            params = {}
         
-        if test_mode:
-            log("[ТЕСТ] Ордер на покупку создан")
-            order_id = "TEST_" + str(int(time.time()))
-        else:
-            buy_order = create_order(
-                api_key, api_secret,
-                symbol=pair,
-                side="BUY",
-                quantity=order_size,
-                price=buy_price
-            )
+        params['timestamp'] = int(time.time() * 1000)
+        params['signature'] = self.sign_request(self.user['api_secret'], params)
+        
+        try:
+            if method == 'GET':
+                response = requests.get(url, headers=headers, params=params)
+            else:
+                response = requests.post(url, headers=headers, params=params)
             
-            if not buy_order or "orderId" not in buy_order:
-                log("Ошибка создания ордера на покупку!")
+            return response.json()
+        except Exception as e:
+            self.log(f"API Error: {str(e)}")
+            return None
+    
+    # Торговые методы
+    def place_order(self, side, price=None):
+        """Размещение ордера"""
+        if self.settings['test_mode']:
+            order_id = f"TEST_{int(time.time())}"
+            self.log(f"[TEST] {side} order placed at {price or 'market'}")
+            return {'orderId': order_id}
+            
+        params = {
+            'symbol': self.settings['trading_pair'],
+            'side': side,
+            'type': 'LIMIT' if price else 'MARKET',
+            'quantity': self.calculate_quantity(),
+            'recvWindow': 5000
+        }
+        
+        if price:
+            params['price'] = price
+            params['timeInForce'] = 'GTC'
+        
+        return self.api_request('order', params, 'POST')
+    
+    def calculate_quantity(self):
+        """Расчет количества для ордера"""
+        price = self.get_price()
+        if not price:
+            return 0.0
+        return round(self.settings['order_size'] / price, 6)
+    
+    def get_price(self):
+        """Получение текущей цены"""
+        params = {'symbol': self.settings['trading_pair']}
+        data = self.api_request('ticker/price', params)
+        return float(data['price']) if data else None
+    
+    # Основная логика
+    def trading_cycle(self):
+        """Основной торговый цикл"""
+        self.log("Trading cycle started")
+        
+        while self.running:
+            if self.paused:
+                time.sleep(1)
+                continue
+                
+            price = self.get_price()
+            if not price:
                 time.sleep(5)
                 continue
-                
-            order_id = buy_order["orderId"]
-            log(f"Ордер на покупку создан: {order_id}")
-        
-        active_orders.append({
-            "order_id": order_id,
-            "side": "BUY",
-            "price": buy_price,
-            "quantity": order_size,
-            "timestamp": time.time()
-        })
-        
-        # Ожидаем исполнения ордера (упрощенная логика)
-        time.sleep(10)
-        
-        # Устанавливаем ордер на продажу
-        sell_price = round(buy_price * (1 + profit_percent), 2)
-        stop_loss_price = round(buy_price * (1 - stop_loss_percent), 2)
-        
-        log(f"Установка тейк-профита {sell_price} и стоп-лосса {stop_loss_price}")
-        
-        if test_mode:
-            log("[ТЕСТ] Ордер на продажу создан")
-            profit = (sell_price - buy_price) * order_size
-            pnl_data["realized"] += profit
-            pnl_data["trades"].append({
-                "pair": pair,
-                "buy_price": buy_price,
-                "sell_price": sell_price,
-                "quantity": order_size,
-                "profit": profit,
-                "timestamp": time.time()
-            })
-            log(f"[ТЕСТ] Прибыль: {profit:.4f} USDT")
-        else:
-            sell_order = create_order(
-                api_key, api_secret,
-                symbol=pair,
-                side="SELL",
-                quantity=order_size,
-                price=sell_price
-            )
             
-            if sell_order and "orderId" in sell_order:
-                log(f"Ордер на продажу создан: {sell_order['orderId']}")
-                active_orders.append({
-                    "order_id": sell_order["orderId"],
-                    "side": "SELL",
-                    "price": sell_price,
-                    "quantity": order_size,
-                    "timestamp": time.time()
-                })
+            # Первая покупка
+            if not self.orders:
+                self.buy_and_set_sell(price)
             else:
-                log("Ошибка создания ордера на продажу!")
-        
-        time.sleep(delay)
-
-# Команды
-
-def manual():
-    """Вывод списка команд"""
-    print("\nКоманды:")
-    print("start        — запуск бота")
-    print("stop         — остановка бота")
-    print("pause        — пауза бота")
-    print("autobuy      — запуск торгового цикла")
-    print("set [ключ] [значение] — изменить настройку")
-    print("balance      — показать баланс USDT")
-    print("manual       — список команд")
-    print("bot stat     — показать состояние бота и PnL")
-    print("exit         — выход из программы")
-    print()
-
-def bot_stat():
-    """Статистика бота"""
-    settings = load_settings(active_user)
-    print("\nТекущий пользователь:", active_user)
-    print("Торговая пара:", settings["trading_pair"])
-    print("Режим:", "ТЕСТОВЫЙ" if settings["test_mode"] else "РЕАЛЬНЫЙ")
-    print("PnL (реализованный):", round(pnl_data["realized"], 4), "USDT")
-    print("Совершено сделок:", len(pnl_data["trades"]))
-    print("Бот работает:", bot_running)
-    print("Бот на паузе:", bot_paused)
-    print()
-
-def show_balance():
-    """Показать баланс"""
-    users = load_users()
-    user_data = users[active_user]
+                # Проверка на снижение цены для докупки
+                last_buy = self.orders[-1]['buy_price']
+                if price <= last_buy * (1 - self.settings['drop_percent']/100):
+                    self.buy_and_set_sell(price)
+                
+                # Проверка исполнения ордеров на продажу
+                self.check_sell_orders(price)
+            
+            time.sleep(self.settings['delay'])
     
-    balance = get_balance(user_data["api_key"], user_data["api_secret"])
-    if balance is not None:
-        log(f"Доступный баланс USDT: {balance:.4f}")
-    else:
-        log("Не удалось получить баланс")
+    def buy_and_set_sell(self, price):
+        """Покупка и установка ордера на продажу"""
+        buy_order = self.place_order('BUY')
+        if not buy_order:
+            return
+            
+        sell_price = round(price * (1 + self.settings['profit_percent']/100), 2)
+        sell_order = self.place_order('SELL', sell_price)
+        
+        if sell_order:
+            self.orders.append({
+                'buy_price': price,
+                'sell_price': sell_price,
+                'sell_order_id': sell_order['orderId'],
+                'timestamp': datetime.now().timestamp()
+            })
+            self.pnl['active_orders'] = len(self.orders)
+            self.log(f"New DCA level: buy@{price}, sell@{sell_price}")
+    
+    def check_sell_orders(self, current_price):
+        """Проверка исполнения ордеров"""
+        for order in self.orders[:]:
+            if current_price >= order['sell_price']:
+                profit = (order['sell_price'] - order['buy_price']) * self.calculate_quantity()
+                self.pnl['total_profit'] += profit
+                self.pnl['total_trades'] += 1
+                self.pnl['history'].append({
+                    'buy': order['buy_price'],
+                    'sell': order['sell_price'],
+                    'profit': profit,
+                    'time': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                })
+                self.orders.remove(order)
+                self.pnl['active_orders'] = len(self.orders)
+                self.log(f"Order executed! Profit: {profit:.2f} USD")
+    
+    # Управление
+    def start(self):
+        if not self.running:
+            self.running = True
+            self.thread = threading.Thread(target=self.trading_cycle)
+            self.thread.start()
+            self.log("Bot started")
+    
+    def stop(self):
+        self.running = False
+        if self.thread:
+            self.thread.join()
+        self.log("Bot stopped")
+    
+    def pause(self):
+        self.paused = not self.paused
+        status = "paused" if self.paused else "resumed"
+        self.log(f"Bot {status}")
+    
+    # Пользовательский интерфейс
+    def create_user(self):
+        """Создание нового пользователя"""
+        username = input("Enter username: ")
+        password = getpass("Enter password: ")
+        api_key = input("Enter MEXC API key: ")
+        api_secret = getpass("Enter MEXC API secret: ")
+        pair = input("Enter trading pair (e.g. BTCUSDT): ").upper()
+        
+        users = self.load_users()
+        users[username] = {
+            'password': password,
+            'api_key': api_key,
+            'api_secret': api_secret,
+            'pair': pair
+        }
+        
+        with open(CONFIG['USERS_FILE'], 'w') as f:
+            json.dump(users, f, indent=2)
+        
+        # Создаем настройки по умолчанию
+        settings = self.load_settings()
+        settings[username] = CONFIG['DEFAULT_SETTINGS'].copy()
+        settings[username]['trading_pair'] = pair
+        
+        with open(CONFIG['SETTINGS_FILE'], 'w') as f:
+            json.dump(settings, f, indent=2)
+        
+        self.log(f"User {username} created")
+        return username
+    
+    def login(self):
+        """Авторизация пользователя"""
+        users = self.load_users()
+        
+        if not users:
+            print("No users found. Creating new one.")
+            return self.create_user()
+        
+        print("Existing users:")
+        for user in users:
+            print(f"- {user}")
+        
+        while True:
+            username = input("Select username: ")
+            if username not in users:
+                print("User not found!")
+                continue
+                
+            password = getpass("Enter password: ")
+            if password == users[username]['password']:
+                self.user = users[username]
+                self.settings = self.load_settings()[username]
+                return username
+            
+            print("Wrong password!")
+    
+    # Утилиты
+    def load_users(self):
+        with open(CONFIG['USERS_FILE'], 'r') as f:
+            return json.load(f)
+    
+    def load_settings(self):
+        with open(CONFIG['SETTINGS_FILE'], 'r') as f:
+            return json.load(f)
+    
+    def update_settings(self, key, value):
+        """Обновление настроек"""
+        try:
+            if key in ['profit_percent', 'drop_percent', 'delay', 'order_size']:
+                self.settings[key] = float(value)
+            elif key == 'trading_pair':
+                self.settings[key] = value.upper()
+            elif key == 'test_mode':
+                self.settings[key] = value.lower() in ['true', '1', 'yes']
+            
+            # Сохраняем в файл
+            settings = self.load_settings()
+            settings[self.current_user] = self.settings
+            with open(CONFIG['SETTINGS_FILE'], 'w') as f:
+                json.dump(settings, f, indent=2)
+            
+            self.log(f"Setting updated: {key} = {value}")
+            return True
+        except Exception as e:
+            self.log(f"Error updating setting: {str(e)}")
+            return False
+    
+    def log(self, message):
+        """Логирование сообщений"""
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        log_entry = f"[{timestamp}] {message}"
+        
+        # Запись в файл
+        log_file = Path(CONFIG['LOGS_DIR']) / f"{self.current_user}.log"
+        with open(log_file, 'a') as f:
+            f.write(log_entry + "\n")
+        
+        # Вывод в консоль
+        print(log_entry)
+    
+    def show_pnl(self):
+        """Отображение PnL статистики"""
+        print("\n--- Trading Statistics ---")
+        print(f"Total Profit: {self.pnl['total_profit']:.2f} USD")
+        print(f"Total Trades: {self.pnl['total_trades']}")
+        print(f"Active Orders: {self.pnl['active_orders']}")
+        print("-------------------------\n")
 
-# Запуск
-
+# CLI интерфейс
 def main():
-    """Основная функция"""
-    global active_user, bot_running, bot_paused, trading_thread
+    bot = MexcTrader()
+    bot.current_user = bot.login()
     
-    active_user = select_user()
-    if not active_user:
-        return
-        
-    manual()
-
+    commands = {
+        'start': bot.start,
+        'stop': bot.stop,
+        'pause': bot.pause,
+        'pnl': bot.show_pnl,
+        'help': lambda: print("\n".join([
+            "Available commands:",
+            "start - Start trading",
+            "stop - Stop trading",
+            "pause - Pause/resume trading",
+            "set [key] [value] - Change setting",
+            "pnl - Show profit/loss stats",
+            "help - Show this help",
+            "exit - Quit program"
+        ]))
+    }
+    
+    print("\nWelcome to MEXC DCA Trading Bot!")
+    print("Type 'help' for available commands\n")
+    
     while True:
-        cmd = input("> ").strip().lower()
-
-        if cmd == "start":
-            bot_running = True
-            log("Бот запущен.")
-
-        elif cmd == "stop":
-            bot_running = False
-            if trading_thread and trading_thread.is_alive():
-                trading_thread.join()
-            log("Бот остановлен.")
-
-        elif cmd == "pause":
-            bot_paused = not bot_paused
-            log(f"Пауза {'включена' if bot_paused else 'снята'}.")
-
-        elif cmd == "autobuy":
-            if not bot_running:
-                log("Сначала запустите бота командой 'start'")
-                continue
+        try:
+            cmd = input("> ").strip().lower()
+            
+            if cmd == 'exit':
+                bot.stop()
+                break
+            elif cmd.startswith('set '):
+                parts = cmd.split()
+                if len(parts) == 3:
+                    bot.update_settings(parts[1], parts[2])
+                else:
+                    print("Usage: set [key] [value]")
+            elif cmd in commands:
+                commands[cmd]()
+            else:
+                print("Unknown command. Type 'help' for available commands")
                 
-            if trading_thread and trading_thread.is_alive():
-                log("Торговый цикл уже запущен!")
-                continue
-                
-            trading_thread = threading.Thread(target=autobuy_loop)
-            trading_thread.start()
-            log("Автоматическая торговля запущена.")
-
-        elif cmd.startswith("set "):
-            try:
-                _, key, value = cmd.split(maxsplit=2)
-                update_setting(key, value)
-            except Exception as e:
-                log(f"Ошибка изменения настройки: {e}")
-
-        elif cmd == "balance":
-            show_balance()
-
-        elif cmd == "manual":
-            manual()
-
-        elif cmd == "bot stat":
-            bot_stat()
-
-        elif cmd in ["exit", "quit"]:
-            bot_running = False
-            if trading_thread and trading_thread.is_alive():
-                trading_thread.join()
-            log("Выход из программы.")
-            break
-
-        else:
-            print("Неизвестная команда. Введите 'manual' для списка.")
+        except KeyboardInterrupt:
+            print("\nUse 'exit' command to quit properly")
+        except Exception as e:
+            print(f"Error: {str(e)}")
 
 if __name__ == "__main__":
     main()
