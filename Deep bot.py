@@ -12,7 +12,7 @@ from pathlib import Path
 import requests
 from cryptography.fernet import Fernet
 
-# ==================== КОНФИГУРАЦИЯ ====================
+# Конфигурация
 CONFIG = {
     "SETTINGS_FILE": "settings.json",
     "USERS_FILE": "users.json",
@@ -20,16 +20,15 @@ CONFIG = {
     "KEY_FILE": ".secret.key",
     "API_URL": "https://api.mexc.com/api/v3",
     "DEFAULT_SETTINGS": {
-        "profit_percent": 0.3,    # Процент прибыли (0.3%)
-        "drop_percent": 1.0,      # Процент для докупки (1%)
-        "delay": 30,              # Задержка между проверками (сек)
-        "order_size": 5.0,        # Размер ордера ($)
+        "profit_percent": 0.3,
+        "drop_percent": 1.0,
+        "delay": 30,
+        "order_size": 5.0,
         "trading_pair": "BTCUSDT",
-        "test_mode": True         # Тестовый режим без реальных сделок
+        "test_mode": True
     }
 }
 
-# ==================== ШИФРОВАНИЕ ====================
 class CryptoManager:
     def __init__(self):
         self.key_file = CONFIG['KEY_FILE']
@@ -54,7 +53,6 @@ class CryptoManager:
         if not encrypted_data: return None
         return Fernet(self._load_key()).decrypt(encrypted_data.encode()).decode()
 
-# ==================== ОСНОВНОЙ БОТ ====================
 class MexcTrader:
     def __init__(self):
         self.crypto = CryptoManager()
@@ -69,57 +67,58 @@ class MexcTrader:
             "history": []
         }
         self.current_user = None
-        self.setup_files()
+        self._init_files()
 
-    def setup_files(self):
-        """Инициализация файлов"""
+    def _init_files(self):
+        """Инициализация файлов с проверкой JSON"""
         Path(CONFIG['LOGS_DIR']).mkdir(exist_ok=True)
+        
         for file in [CONFIG['SETTINGS_FILE'], CONFIG['USERS_FILE']]:
             if not os.path.exists(file):
                 with open(file, 'w') as f:
                     json.dump({}, f)
-                os.chmod(file, 0o600)
+            else:
+                try:
+                    with open(file, 'r') as f:
+                        json.load(f)
+                except json.JSONDecodeError:
+                    with open(file, 'w') as f:
+                        json.dump({}, f)
+            os.chmod(file, 0o600)
 
-    # ============ ТОРГОВАЯ ЛОГИКА ============
+    # ==================== ТОРГОВАЯ ЛОГИКА ====================
     def trading_cycle(self):
-        """Главный торговый цикл"""
-        self.log("Торговый цикл запущен")
+        """Основной цикл торговли"""
+        self.log("Запуск торгового цикла")
         
         while self.running:
             if self.paused:
                 time.sleep(1)
                 continue
                 
-            # 1. Получаем текущую цену
             price = self.get_price()
             if not price:
                 time.sleep(5)
                 continue
             
-            # 2. Первая покупка (если нет активных ордеров)
+            # Логика DCA
             if not self.orders:
                 self.buy_and_set_sell(price)
             else:
-                # 3. Проверка на падение цены для докупки
                 last_buy = self.orders[-1]['buy_price']
                 if price <= last_buy * (1 - self.settings['drop_percent']/100):
                     self.buy_and_set_sell(price)
                 
-                # 4. Проверка исполнения ордеров
                 self.check_sell_orders(price)
             
             time.sleep(self.settings['delay'])
 
     def buy_and_set_sell(self, price):
-        """Покупка + установка тейк-профита"""
-        # 1. Покупаем по рынку
+        """Покупка и установка тейк-профита"""
         buy_order = self.place_order('BUY')
         if not buy_order: return
         
-        # 2. Вычисляем цену продажи
         sell_price = round(price * (1 + self.settings['profit_percent']/100), 2)
-        
-        # 3. Выставляем лимитный ордер на продажу
         sell_order = self.place_order('SELL', sell_price)
         
         if sell_order:
@@ -130,17 +129,13 @@ class MexcTrader:
                 'timestamp': datetime.now().timestamp()
             })
             self.pnl['active_orders'] = len(self.orders)
-            self.log(f"Покупка: {price:.2f} → Продажа: {sell_price:.2f}")
+            self.log(f"DCA: Куплено по {price:.2f} → Продажа по {sell_price:.2f}")
 
     def check_sell_orders(self, current_price):
         """Проверка исполнения ордеров"""
         for order in list(self.orders):
             if current_price >= order['sell_price']:
-                # Расчет прибыли
-                quantity = self.settings['order_size'] / order['buy_price']
-                profit = (order['sell_price'] - order['buy_price']) * quantity
-                
-                # Обновляем статистику
+                profit = (order['sell_price'] - order['buy_price']) * self.calculate_quantity()
                 self.pnl['total_profit'] += profit
                 self.pnl['total_trades'] += 1
                 self.pnl['history'].append({
@@ -149,13 +144,11 @@ class MexcTrader:
                     'profit': profit,
                     'time': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 })
-                
-                # Удаляем исполненный ордер
                 self.orders.remove(order)
                 self.pnl['active_orders'] = len(self.orders)
                 self.log(f"Ордер исполнен! Прибыль: {profit:.2f}$")
 
-    # ============ API МЕТОДЫ ============
+    # ==================== API МЕТОДЫ ====================
     def place_order(self, side, price=None):
         """Отправка ордера на биржу"""
         if self.settings['test_mode']:
@@ -165,9 +158,9 @@ class MexcTrader:
             
         params = {
             'symbol': self.settings['trading_pair'],
-            'side': side,
+            'side': side.upper(),
             'type': 'LIMIT' if price else 'MARKET',
-            'quantity': round(self.settings['order_size'] / self.get_price(), 6),
+            'quantity': self.calculate_quantity(),
             'timestamp': int(time.time() * 1000)
         }
         
@@ -181,21 +174,35 @@ class MexcTrader:
             hashlib.sha256
         ).hexdigest()
         
-        headers = {"X-MEXC-APIKEY": self.user['api_key']}
-        response = requests.post(
-            f"{CONFIG['API_URL']}/order",
-            headers=headers,
-            params=params
-        )
-        return response.json()
+        try:
+            response = requests.post(
+                f"{CONFIG['API_URL']}/order",
+                headers={"X-MEXC-APIKEY": self.user['api_key']},
+                params=params
+            )
+            return response.json()
+        except Exception as e:
+            self.log(f"API Error: {str(e)}")
+            return None
 
     def get_price(self):
         """Получение текущей цены"""
-        params = {'symbol': self.settings['trading_pair']}
-        data = requests.get(f"{CONFIG['API_URL']}/ticker/price", params=params).json()
-        return float(data['price']) if 'price' in data else None
+        try:
+            response = requests.get(
+                f"{CONFIG['API_URL']}/ticker/price",
+                params={'symbol': self.settings['trading_pair']}
+            )
+            return float(response.json()['price'])
+        except:
+            self.log("Ошибка получения цены")
+            return None
 
-    # ============ УПРАВЛЕНИЕ ============
+    def calculate_quantity(self):
+        """Расчет количества для ордера"""
+        price = self.get_price()
+        return round(self.settings['order_size'] / price, 6) if price else 0.0
+
+    # ==================== УПРАВЛЕНИЕ ====================
     def start(self):
         if not self.running:
             self.running = True
@@ -213,9 +220,9 @@ class MexcTrader:
         self.paused = not self.paused
         self.log(f"Бот {'на паузе' if self.paused else 'возобновил работу'}")
 
-    # ============ ПОЛЬЗОВАТЕЛИ ============
+    # ==================== ПОЛЬЗОВАТЕЛИ ====================
     def create_user(self):
-        """Создание нового пользователя с шифрованием"""
+        """Создание пользователя с шифрованием"""
         username = input("Имя пользователя: ")
         password = getpass("Пароль: ")
         api_key = input("API ключ MEXC: ")
@@ -241,7 +248,7 @@ class MexcTrader:
         return username
 
     def login(self):
-        """Авторизация с проверкой зашифрованного пароля"""
+        """Авторизация с проверкой пароля"""
         users = self.load_users()
         if not users:
             print("Нет пользователей. Создаем нового.")
@@ -272,7 +279,7 @@ class MexcTrader:
             
             print("Неверный пароль!")
 
-    # ============ УТИЛИТЫ ============
+    # ==================== УТИЛИТЫ ====================
     def log(self, message):
         """Логирование в файл и консоль"""
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -327,7 +334,6 @@ class MexcTrader:
             self.log(f"Ошибка: {str(e)}")
             return False
 
-# ==================== CLI ====================
 def main():
     bot = MexcTrader()
     bot.current_user = bot.login()
