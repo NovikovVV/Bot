@@ -1,0 +1,56 @@
+Ошибка quantity scale is invalid с кодом 400 от MEXC означает, что количество (quantity) задано с неверным числом знаков после запятой — оно превышает допустимую точность для этой торговой пары.
+
+
+---
+
+Решение: определять quantityPrecision из API exchangeInfo
+
+Так же как tickSize определяет точность цены, stepSize определяет допустимую точность количества. Мы можем использовать его, чтобы автоматически ограничивать quantity.
+
+
+---
+
+Шаги для исправления
+
+1. Добавьте метод определения точности количества (stepSize)
+
+Внутри MexcTrader:
+
+def get_quantity_precision(self):
+    """Определение точности количества (step size)"""
+    try:
+        symbol = self.settings['trading_pair']
+        url = "https://api.mexc.com/api/v3/exchangeInfo"
+        response = requests.get(url)
+        data = response.json()
+        for s in data['symbols']:
+            if s['symbol'] == symbol:
+                for f in s['filters']:
+                    if f['filterType'] == 'LOT_SIZE':
+                        step_size = float(f['stepSize'])
+                        return abs(decimal.Decimal(str(step_size)).as_tuple().exponent)
+    except Exception as e:
+        self.log(f"Ошибка получения точности количества: {str(e)}")
+    return 4  # безопасное значение по умолчанию
+
+
+---
+
+2. Измените метод calculate_quantity
+
+Замените:
+
+return round(self.settings['order_size'] / price, 6)
+
+На:
+
+precision = self.get_quantity_precision()
+quantity = self.settings['order_size'] / price
+return round(quantity, precision)
+
+
+---
+
+Теперь бот будет учитывать точность количества, указанную биржей, и ошибка quantity scale is invalid должна исчезнуть.
+
+Хочешь — могу выдать весь обновлённый код или файл со всеми правками.
