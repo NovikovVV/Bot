@@ -1,0 +1,24 @@
+<!doctype html>
+<html>
+  <head><meta charset="utf-8"><title>Register</title></head>
+  <body>
+    <h2>Register</h2>
+    <form method="post" action="/register">
+      <label>Username: <input name="username"></label><br>
+      <label>Password: <input name="password" type="password"></label><br>
+      <label>API Key: <input name="api_key"></label><br>
+      <label>API Secret: <input name="api_secret" type="password"></label><br>
+      <label>Symbol: <input name="symbol" value="BTCUSDT"></label><br>
+      <label>Mode:
+        <select name="mode">
+          <option value="TEST">TEST</option>
+          <option value="LIVE">LIVE</option>
+        </select>
+      </label><br>
+      <label>Deposit % of available (0-100): <input name="deposit_pct" value="100"></label><br>
+      <label>Total deposit USDT (used in TEST mode): <input name="deposit_usdt" value="1000"></label><br>
+      <button type="submit">Create</button>
+    </form>
+    <p>Have account? <a href="/login">Login</a></p>
+  </body>
+</html>

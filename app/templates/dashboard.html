@@ -1,0 +1,61 @@
+<!doctype html>
+<html>
+  <head><meta charset="utf-8"><title>Dashboard</title></head>
+  <body>
+    <h1>Dashboard - {{ user['username'] }}</h1>
+    <p>Status: {{ status_html | safe }}</p>
+
+    <form method="post" action="/start">
+      <input type="hidden" name="user_id" value="{{ user['id'] }}">
+      <button type="submit">Start (autobuy)</button>
+    </form>
+
+    <form method="post" action="/stop">
+      <input type="hidden" name="user_id" value="{{ user['id'] }}">
+      <button type="submit">Stop</button>
+    </form>
+
+    <h3>Orders</h3>
+    <button onclick="loadOrders('active')">Active</button>
+    <button onclick="loadOrders('completed')">Completed</button>
+    <button onclick="loadOrders('all')">All</button>
+    <div id="orders"></div>
+
+    <h3>Balance</h3>
+    <div id="balance">Loading...</div>
+
+    <script>
+    async function loadOrders(filter){
+      const resp = await fetch('/orders/{{ user['id'] }}/' + filter);
+      const data = await resp.json();
+      let html = '<table border=1><tr><th>lot</th><th>buy_price</th><th>qty</th><th>target</th><th>status</th></tr>';
+      for(const r of data){
+        html += `<tr><td>${r.id}</td><td>${r.buy_price}</td><td>${r.qty}</td><td>${r.target_price}</td><td>${r.status}</td></tr>`;
+      }
+      html += '</table>';
+      document.getElementById('orders').innerHTML = html;
+    }
+    async function loadBalance(){
+      const resp = await fetch('/balance/{{ user['id'] }}');
+      const d = await resp.json();
+      document.getElementById('balance').innerText = 'Price: ' + d.price + ' | Available USDT: ' + d.available_usdt;
+    }
+    loadOrders('active');
+    setInterval(loadBalance, 5000);
+    </script>
+
+    <h3>Settings</h3>
+    <pre>
+Symbol: {{ user['symbol'] }}
+Profit %: {{ user['profit_pct'] }}
+Drop %: {{ user['drop_pct'] }}
+Delay sec: {{ user['delay_sec'] }}
+Order USD: {{ user['order_usd'] }}
+Deposit %: {{ user['deposit_pct'] }}
+Total deposit USDT: {{ user['deposit_usdt'] }}
+Mode: {{ user['mode'] }}
+    </pre>
+
+    <p><a href="/logs">Download logs</a> | <a href="/download/db">Download DB</a></p>
+  </body>
+</html>

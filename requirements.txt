@@ -1,0 +1,7 @@
+fastapi
+uvicorn[standard]
+requests
+cryptography
+jinja2
+python-multipart
+tabulate
