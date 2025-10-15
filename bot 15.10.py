@@ -1,3 +1,4 @@
+from __future__ import annotations
 #!/usr/bin/env python3
 """
 MEXC AutoBot Web - final fixed
@@ -11,7 +12,7 @@ Run:
     pip install fastapi uvicorn[standard] requests cryptography tabulate
     uvicorn mexc_autobot_web_auth_final:app --host 0.0.0.0 --port 8000
 """
-from __future__ import annotations
+from urllib.parse import urlencode
 import asyncio
 import hmac
 import hashlib
@@ -234,33 +235,80 @@ class MexcClient:
         return params
 
     def _post(self, path: str, params: dict) -> dict:
-    params.setdefault('timestamp', now_ms())
-    params.setdefault('recvWindow', 10000)
-    signed = self._signature(params)
-    if self.simulate:
-        price = self.ticker_price(params.get('symbol',''))
-        if params.get('side') == 'BUY' and 'quoteOrderQty' in params:
-            quote = float(params['quoteOrderQty'])
-            qty = quote / price if price>0 else 0.0
-            return {'orderId': f"test-buy-{now_ms()}", 'fills':[{'price': str(price),'qty': str(qty)}], 'simulated': True}
-        if params.get('side') == 'SELL' and 'quantity' in params:
-            qty = float(params['quantity'])
-            return {'orderId': f"test-sell-{now_ms()}", 'fills':[{'price': str(price),'qty': str(qty)}], 'simulated': True}
-        return {'orderId': f"test-{now_ms()}", 'simulated': True}
-    else:
-        r = self.session.post(f"{API_BASE}{path}", data=signed)
-        try:
-            r.raise_for_status()
-        except Exception as e:
-            log(f"MEXC POST ERROR: {e} | {r.text}")
-            raise
-        return r.json()
+    # Создаем чистый словарь параметров
+        clean_params = {
+            'symbol': params.get('symbol'),
+            'side': params.get('side'),
+            'type': params.get('type'),
+            'quoteOrderQty': params.get('quoteOrderQty'),
+            'quantity': params.get('quantity'),
+            'timestamp': now_ms(),
+            'recvWindow': 10000
+        }
+    
+    # Удаляем None значения
+        clean_params = {k: v for k, v in clean_params.items() if v is not None}
+    
+    # Формируем query строку
+        query = "&".join([f"{k}={v}" for k, v in sorted(clean_params.items())])
+    # ЖЕСТКОЕ ИСПРАВЛЕНИЕ: заменить ВСЕ возможные варианты крестика
+        query = query.replace("×", "t")  # обычный крестик
+        query = query.replace("Ã—", "t")  # UTF-8 крестик
+        query = query.replace("&times;", "t")  # HTML entity
+        query = query.replace("xtamp", "timestamp")  # на всякий случай
+        log(f"DEBUG: Clean query: {query}")
+    
+        signature = hmac.new(self.api_secret.encode(), query.encode(), hashlib.sha256).hexdigest()
+        url = f"{API_BASE}{path}?{query}&signature={signature}"
+
+        log(f"MEXC REQ -> POST {path}")
+
+        resp = self.session.post(url, headers={"X-MEXC-APIKEY": self.api_key})
+        if not resp.ok:
+            log(f"MEXC POST ERROR: {resp.status_code} | {resp.text}")
+            resp.raise_for_status()
+    
+        result = resp.json()
+        log(f"DEBUG: API Response: {result}")
+        return result
 
     def market_buy_quote(self, symbol: str, quote_qty: float) -> dict:
-        return self._post('/api/v3/order', {'symbol': symbol, 'side': 'BUY', 'type': 'MARKET', 'quoteOrderQty': f"{quote_qty}"})
+        try:
+            return self._post('/api/v3/order', {
+                'symbol': symbol, 
+                'side': 'BUY', 
+                'type': 'MARKET', 
+                'quoteOrderQty': str(quote_qty)
+            })
+        except Exception as e:
+            log(f"Market buy error: {e}")
+            # Возвращаем симуляцию для тестирования
+            if self.simulate:
+                return {
+                    'orderId': f'sim_{int(time.time())}',
+                    'fills': [{'qty': str(quote_qty / 100), 'price': '100.0'}],
+                    'simulated': True
+                }
+            raise
 
     def market_sell_base(self, symbol: str, qty: float) -> dict:
-        return self._post('/api/v3/order', {'symbol': symbol, 'side': 'SELL', 'type': 'MARKET', 'quantity': f"{qty}"})
+        try:
+            return self._post('/api/v3/order', {
+                'symbol': symbol, 
+                'side': 'SELL', 
+                'type': 'MARKET', 
+                'quantity': str(qty)
+            })
+        except Exception as e:
+            log(f"Market sell error: {e}")
+            # Возвращаем симуляцию для тестирования
+            if self.simulate:
+                return {
+                    'orderId': f'sim_{int(time.time())}',
+                    'fills': [{'qty': str(qty), 'price': '100.0'}],
+                    'simulated': True
+                 }
+            raise
 
 # --- Strategy & Bot ---
 @dataclass
